@@ -1,3 +1,5 @@
+use types::U256;
+
 /// Transaction parameter option
 #[derive(Clone, Copy, Debug)]
 pub struct TransactionOptions<'a> {
@@ -5,7 +7,8 @@ pub struct TransactionOptions<'a> {
     address: &'a str,
     current_height: Option<u64>,
     quota: Option<u64>,
-    value: Option<&'a str>,
+    value: Option<U256>,
+    version: Option<u32>,
 }
 
 impl<'a> TransactionOptions<'a> {
@@ -17,6 +20,7 @@ impl<'a> TransactionOptions<'a> {
             current_height: None,
             quota: None,
             value: None,
+            version: None,
         }
     }
 
@@ -68,14 +72,25 @@ impl<'a> TransactionOptions<'a> {
     }
 
     /// Set value. Transaction transfer amount
-    pub fn set_value(mut self, value: Option<&'a str>) -> Self {
+    pub fn set_value(mut self, value: Option<U256>) -> Self {
         self.value = value;
         self
     }
 
     /// Get value
-    pub fn value(&self) -> Option<&str> {
+    pub fn value(&self) -> Option<U256> {
         self.value
+    }
+
+    /// Set version.
+    pub fn set_version(mut self, version: Option<u32>) -> Self {
+        self.version = version;
+        self
+    }
+
+    /// Get version
+    pub fn version(&self) -> Option<u32> {
+        self.version
     }
 
     /// Restore initialization status
@@ -85,5 +100,12 @@ impl<'a> TransactionOptions<'a> {
         self.current_height = None;
         self.address = "0x";
         self.code = "0x";
+        self.version = None
+    }
+}
+
+impl Default for TransactionOptions<'static> {
+    fn default() -> Self {
+        TransactionOptions::new()
     }
 }

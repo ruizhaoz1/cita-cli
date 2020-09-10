@@ -1,11 +1,17 @@
 use clap::{App, Arg, ArgMatches, SubCommand};
 
 use cita_tool::client::basic::Client;
-use cita_tool::{encode, ProtoMessage, TransactionOptions};
+use cita_tool::{encode, ProtoMessage, TransactionOptions, UnverifiedTransaction};
 
-use cli::{blake2b, get_url, is_hex, parse_privkey, parse_u64};
-use interactive::GlobalConfig;
-use printer::Printer;
+use crate::cli::{
+    encryption, get_url, is_hex, key_validator, parse_address, parse_privkey, parse_u256,
+    parse_u32, parse_u64,
+};
+use crate::interactive::{set_output, GlobalConfig};
+use crate::printer::Printer;
+use std::fs::File;
+use std::io::Read;
+use std::str::FromStr;
 
 /// Transaction command
 pub fn tx_command() -> App<'static, 'static> {
@@ -17,17 +23,17 @@ pub fn tx_command() -> App<'static, 'static> {
                 .arg(
                     Arg::with_name("code")
                         .long("code")
+                        .default_value("0x")
                         .takes_value(true)
-                        .required(true)
                         .validator(|code| is_hex(code.as_str()))
-                        .help("Binary content of the transaction"),
+                        .help("Binary content of the transaction, default is empty"),
                 )
                 .arg(
                     Arg::with_name("address")
                         .long("address")
                         .default_value("0x")
                         .takes_value(true)
-                        .validator(|address| is_hex(address.as_str()))
+                        .validator(|address| parse_address(address.as_str()))
                         .help(
                             "The address of the invoking contract, default is empty to \
                              create contract",
@@ -44,11 +50,8 @@ pub fn tx_command() -> App<'static, 'static> {
                     Arg::with_name("chain-id")
                         .long("chain-id")
                         .takes_value(true)
-                        .validator(|chain_id| match chain_id.parse::<u32>() {
-                            Ok(_) => Ok(()),
-                            Err(err) => Err(format!("{:?}", err)),
-                        })
-                        .help("The chain_id of transaction"),
+                        .validator(|chain_id| parse_u256(chain_id.as_ref()).map(|_| ()))
+                        .help("The chain_id of transaction, default query to the chain"),
                 )
                 .arg(
                     Arg::with_name("quota")
@@ -61,8 +64,15 @@ pub fn tx_command() -> App<'static, 'static> {
                     Arg::with_name("value")
                         .long("value")
                         .takes_value(true)
-                        .validator(|value| is_hex(value.as_ref()))
+                        .validator(|value| parse_u256(value.as_ref()).map(|_| ()))
                         .help("The value to send, default is 0"),
+                )
+                .arg(
+                    Arg::with_name("version")
+                        .long("version")
+                        .takes_value(true)
+                        .validator(|version| parse_u32(version.as_str()).map(|_| ()))
+                        .help("The version of transaction, default is 0"),
                 ),
         )
         .subcommand(
@@ -72,7 +82,7 @@ pub fn tx_command() -> App<'static, 'static> {
                     Arg::with_name("byte-code")
                         .long("byte-code")
                         .takes_value(true)
-                        .validator(|address| is_hex(address.as_str()))
+                        .validator(|code| is_hex(code.as_str()))
                         .required(true)
                         .help("Signed transaction binary data"),
                 ),
@@ -84,17 +94,36 @@ pub fn tx_command() -> App<'static, 'static> {
                     Arg::with_name("byte-code")
                         .long("byte-code")
                         .takes_value(true)
-                        .validator(|address| is_hex(address.as_str()))
+                        .validator(|code| is_hex(code.as_str()))
                         .required(true)
                         .help("Unsigned transaction binary data"),
                 )
                 .arg(
                     Arg::with_name("private-key")
                         .long("private-key")
-                        .validator(|private| parse_privkey(private.as_str()).map(|_| ()))
+                        .validator(|private| key_validator(private.as_str()).map(|_| ()))
                         .takes_value(true)
                         .required(true)
                         .help("Transfer Account Private Key"),
+                ),
+        )
+        .subcommand(
+            SubCommand::with_name("decode-unverifiedTransaction")
+                .about("Decode unverifiedTransaction")
+                .arg(
+                    Arg::with_name("content")
+                        .long("content")
+                        .takes_value(true)
+                        .validator(|content| is_hex(content.as_str()))
+                        .conflicts_with("file")
+                        .required(true)
+                        .help("UnverifiedTransaction content"),
+                )
+                .arg(
+                    Arg::with_name("file")
+                        .long("file")
+                        .takes_value(true)
+                        .help("content data file path"),
                 ),
         )
 }
@@ -102,37 +131,35 @@ pub fn tx_command() -> App<'static, 'static> {
 pub fn tx_processor(
     sub_matches: &ArgMatches,
     printer: &Printer,
-    url: Option<&str>,
-    env_variable: &GlobalConfig,
+    config: &mut GlobalConfig,
+    client: Client,
 ) -> Result<(), String> {
-    let debug = sub_matches.is_present("debug") || env_variable.debug();
-    let is_color = !sub_matches.is_present("no-color") && env_variable.color();
-    let mut client = Client::new()
-        .map_err(|err| format!("{}", err))?
+    let debug = sub_matches.is_present("debug") || config.debug();
+    let is_color = !sub_matches.is_present("no-color") && config.color();
+    let mut client = client
         .set_debug(debug)
-        .set_uri(url.unwrap_or_else(|| match sub_matches.subcommand() {
-            (_, Some(m)) => get_url(m),
-            _ => "http://127.0.0.1:1337",
-        }));
+        .set_uri(get_url(sub_matches, config));
+
     let result = match sub_matches.subcommand() {
         ("make", Some(m)) => {
-            if let Some(chain_id) = m.value_of("chain-id").map(|s| s.parse::<u32>().unwrap()) {
+            if let Some(chain_id) = m.value_of("chain-id").map(|s| parse_u256(s).unwrap()) {
                 client.set_chain_id(chain_id);
-            }
-            if let Some(private_key) = m.value_of("private-key") {
-                client.set_private_key(parse_privkey(private_key)?);
             }
             let code = m.value_of("code").unwrap();
             let address = m.value_of("address").unwrap();
             let current_height = m.value_of("height").map(|s| parse_u64(s).unwrap());
-            let quota = m.value_of("quota").map(|s| s.parse::<u64>().unwrap());
-            let value = m.value_of("value");
+            let quota = m.value_of("quota").map(|s| parse_u64(s).unwrap());
+            let value = m.value_of("value").map(|value| parse_u256(value).unwrap());
+            let version = m
+                .value_of("version")
+                .map(|version| parse_u32(version).unwrap());
             let tx_options = TransactionOptions::new()
                 .set_code(code)
                 .set_address(address)
                 .set_current_height(current_height)
                 .set_quota(quota)
-                .set_value(value);
+                .set_value(value)
+                .set_version(version);
             let tx = client
                 .generate_transaction(tx_options)
                 .map_err(|err| format!("{}", err))?;
@@ -150,12 +177,27 @@ pub fn tx_processor(
             client.send_signed_transaction(byte_code)
         }
         ("sendTransaction", Some(m)) => {
-            let blake2b = blake2b(sub_matches, env_variable);
+            let encryption = encryption(sub_matches, config);
             if let Some(private_key) = m.value_of("private-key") {
-                client.set_private_key(parse_privkey(private_key)?);
+                client.set_private_key(&parse_privkey(private_key, encryption)?);
             }
             let byte_code = m.value_of("byte-code").unwrap();
-            client.send_transaction(byte_code, blake2b)
+            client.send_transaction(byte_code)
+        }
+        ("decode-unverifiedTransaction", Some(m)) => {
+            let encryption = encryption(sub_matches, config);
+            let content = m.value_of("content");
+            let content_file = m.value_of("file");
+            let mut content_reader = get_content(content_file, content)?;
+            let mut content_data = String::new();
+            content_reader
+                .read_to_string(&mut content_data)
+                .map_err(|err| format!("{}", err))?;
+            let content_data = content_data.trim();
+            let tx =
+                UnverifiedTransaction::from_str(&content_data).map_err(|err| format!("{}", err))?;
+            printer.println(&tx.to_json(encryption)?, is_color);
+            return Ok(());
         }
         _ => {
             return Err(sub_matches.usage().to_owned());
@@ -163,5 +205,19 @@ pub fn tx_processor(
     };
     let resp = result.map_err(|err| format!("{}", err))?;
     printer.println(&resp, is_color);
+    set_output(&resp, config);
     Ok(())
+}
+
+fn get_content(path: Option<&str>, content: Option<&str>) -> Result<Box<dyn Read>, String> {
+    match content {
+        Some(data) => Ok(Box::new(::std::io::Cursor::new(data.to_owned()))),
+        None => {
+            let file = match path {
+                Some(path) => File::open(path).map_err(|err| format!("{}", err))?,
+                None => return Err("No input content".to_owned()),
+            };
+            Ok(Box::new(file))
+        }
+    }
 }

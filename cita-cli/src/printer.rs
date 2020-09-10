@@ -5,10 +5,10 @@ use std::rc::Rc;
 
 use ansi_term::Colour::{Red, Yellow};
 use atty;
-use serde_json;
+use serde_json::{self, json};
 
+use crate::json_color::Colorizer;
 use cita_tool::{JsonRpcResponse, KeyPair};
-use json_color::Colorizer;
 
 pub fn is_a_tty(stderr: bool) -> bool {
     let stream = if stderr {
@@ -156,11 +156,8 @@ impl Printable for JsonRpcResponse {
 
 impl Printable for serde_json::Value {
     fn rc_string(&self, format: OutputFormat, color: bool) -> Rc<String> {
-        match (format, self) {
-            (OutputFormat::Raw, serde_json::Value::String(content)) => {
-                return Rc::new(content.clone());
-            }
-            _ => {}
+        if let (OutputFormat::Raw, serde_json::Value::String(content)) = (format, self) {
+            return Rc::new(content.clone());
         }
         let content = if color {
             Colorizer::arbitrary().colorize_json_value(self).unwrap()
@@ -175,14 +172,15 @@ impl Printable for KeyPair {
     fn rc_string(&self, format: OutputFormat, color: bool) -> Rc<String> {
         match format {
             OutputFormat::Json => json!({
-                    "private": format!("0x{}", self.privkey()),
-                    "public": format!("0x{}", self.pubkey()),
-                    "address": format!("0x{:#x}", self.address())
-                }).rc_string(format, color),
+                "private": format!("0x{}", self.privkey()),
+                "public": format!("0x{}", self.pubkey()),
+                "address": format!("0x{:x}", self.address())
+            })
+            .rc_string(format, color),
             OutputFormat::Raw => {
                 let content = if color {
                     format!(
-                        concat!("{} 0x{}\n", "{} 0x{}\n", "{} 0x{:#x}"),
+                        concat!("{} 0x{}\n", "{} 0x{}\n", "{} 0x{:x}"),
                         Yellow.paint("[ private ]:"),
                         self.privkey(),
                         Yellow.paint("[ public  ]:"),
@@ -192,7 +190,7 @@ impl Printable for KeyPair {
                     )
                 } else {
                     format!(
-                        concat!("{} 0x{}\n", "{} 0x{}\n", "{} 0x{:#x}"),
+                        concat!("{} 0x{}\n", "{} 0x{}\n", "{} 0x{:x}"),
                         "[ private ]:",
                         self.privkey(),
                         "[ public  ]:",

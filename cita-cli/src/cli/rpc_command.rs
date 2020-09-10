@@ -1,24 +1,30 @@
-use ansi_term::Colour::Yellow;
 use clap::{App, Arg, ArgMatches, SubCommand};
 
-use cita_tool::client::basic::{Client, ClientExt};
 use cita_tool::{
-    pubkey_to_address, ParamsValue, ResponseValue, TransactionOptions, UnverifiedTransaction,
+    client::basic::{Client, ClientExt},
+    error::ToolError,
+    rpctypes::JsonRpcResponse,
+    ParamsValue, ResponseValue, TransactionOptions, UnverifiedTransaction,
 };
 
-use cli::{blake2b, get_url, is_hex, parse_height, parse_privkey, parse_u64};
-use interactive::GlobalConfig;
-use printer::Printer;
+use crate::cli::{
+    encryption, get_url, h256_validator, is_hex, key_validator, parse_address, parse_height,
+    parse_privkey, parse_u256, parse_u32, parse_u64,
+};
+use crate::interactive::{set_output, GlobalConfig};
+use crate::printer::Printer;
+use std::str::FromStr;
 
 /// Generate rpc sub command
 pub fn rpc_command() -> App<'static, 'static> {
     App::new("rpc")
         .about("All cita jsonrpc interface commands")
         .subcommand(SubCommand::with_name("peerCount").about("Get network peer count"))
+        .subcommand(SubCommand::with_name("peersInfo").about("Get all peers information"))
         .subcommand(SubCommand::with_name("blockNumber").about("Get current height"))
         .subcommand(
             SubCommand::with_name("sendRawTransaction")
-                .about("Send a transaction return transaction hash")
+                .about("Send a transaction and return transaction hash")
                 .arg(
                     Arg::with_name("code")
                         .long("code")
@@ -32,7 +38,7 @@ pub fn rpc_command() -> App<'static, 'static> {
                         .long("address")
                         .default_value("0x")
                         .takes_value(true)
-                        .validator(|address| is_hex(address.as_str()))
+                        .validator(|address| parse_address(address.as_str()))
                         .help(
                             "The address of the invoking contract, default is empty to \
                              create contract",
@@ -49,10 +55,7 @@ pub fn rpc_command() -> App<'static, 'static> {
                     Arg::with_name("chain-id")
                         .long("chain-id")
                         .takes_value(true)
-                        .validator(|chain_id| match chain_id.parse::<u32>() {
-                            Ok(_) => Ok(()),
-                            Err(err) => Err(format!("{:?}", err)),
-                        })
+                        .validator(|chain_id| parse_u256(chain_id.as_ref()).map(|_| ()))
                         .help("The chain_id of transaction"),
                 )
                 .arg(
@@ -60,7 +63,7 @@ pub fn rpc_command() -> App<'static, 'static> {
                         .long("private-key")
                         .takes_value(true)
                         .required(true)
-                        .validator(|privkey| parse_privkey(privkey.as_ref()).map(|_| ()))
+                        .validator(|privkey| key_validator(privkey.as_ref()).map(|_| ()))
                         .help("The private key of transaction"),
                 )
                 .arg(
@@ -68,14 +71,21 @@ pub fn rpc_command() -> App<'static, 'static> {
                         .long("quota")
                         .takes_value(true)
                         .validator(|quota| parse_u64(quota.as_ref()).map(|_| ()))
-                        .help("Transaction quota costs, default is 1_000_000"),
+                        .help("Transaction quota costs, default 10_000_000"),
                 )
                 .arg(
                     Arg::with_name("value")
                         .long("value")
                         .takes_value(true)
-                        .validator(|value| is_hex(value.as_ref()))
+                        .validator(|value| parse_u256(value.as_ref()).map(|_| ()))
                         .help("The value to send, default is 0"),
+                )
+                .arg(
+                    Arg::with_name("version")
+                        .long("version")
+                        .takes_value(true)
+                        .validator(|version| parse_u32(version.as_str()).map(|_| ()))
+                        .help("The version of transaction, default is 0"),
                 ),
         )
         .subcommand(
@@ -118,6 +128,7 @@ pub fn rpc_command() -> App<'static, 'static> {
                     Arg::with_name("address")
                         .long("address")
                         .required(true)
+                        .validator(|address| parse_address(address.as_str()))
                         .takes_value(true)
                         .help("The address of the code"),
                 )
@@ -137,6 +148,7 @@ pub fn rpc_command() -> App<'static, 'static> {
                     Arg::with_name("address")
                         .long("address")
                         .required(true)
+                        .validator(|address| parse_address(address.as_str()))
                         .takes_value(true)
                         .help("The address of the abi data"),
                 )
@@ -156,6 +168,7 @@ pub fn rpc_command() -> App<'static, 'static> {
                     Arg::with_name("address")
                         .long("address")
                         .required(true)
+                        .validator(|address| parse_address(address.as_str()))
                         .takes_value(true)
                         .help("The address of the balance"),
                 )
@@ -185,12 +198,14 @@ pub fn rpc_command() -> App<'static, 'static> {
                 .arg(
                     Arg::with_name("from")
                         .long("from")
+                        .validator(|address| parse_address(address.as_str()))
                         .takes_value(true)
                         .help("From address"),
                 )
                 .arg(
                     Arg::with_name("to")
                         .long("to")
+                        .validator(|address| parse_address(address.as_str()))
                         .takes_value(true)
                         .required(true)
                         .help("To address"),
@@ -240,7 +255,7 @@ pub fn rpc_command() -> App<'static, 'static> {
                         .long("address")
                         .takes_value(true)
                         .multiple(true)
-                        .validator(|address| is_hex(address.as_ref()))
+                        .validator(|address| parse_address(address.as_str()))
                         .help("List of contract address"),
                 )
                 .arg(
@@ -288,6 +303,7 @@ pub fn rpc_command() -> App<'static, 'static> {
                     Arg::with_name("address")
                         .long("address")
                         .required(true)
+                        .validator(|address| parse_address(address.as_str()))
                         .takes_value(true)
                         .help("The hash of the account"),
                 )
@@ -339,11 +355,11 @@ pub fn rpc_command() -> App<'static, 'static> {
         )
         .subcommand(
             SubCommand::with_name("newFilter")
-                .about("Creates a filter object")
+                .about("Create a filter object")
                 .arg(
                     Arg::with_name("address")
                         .long("address")
-                        .validator(|address| is_hex(address.as_ref()))
+                        .validator(|address| parse_address(address.as_str()))
                         .takes_value(true)
                         .multiple(true)
                         .help("Contract Address"),
@@ -371,48 +387,154 @@ pub fn rpc_command() -> App<'static, 'static> {
                         .help("Starting block height"),
                 ),
         )
+        .subcommand(
+            SubCommand::with_name("getBlockHeader")
+                .about("Get block headers based on block height")
+                .arg(
+                    Arg::with_name("height")
+                        .long("height")
+                        .default_value("latest")
+                        .validator(|s| parse_height(s.as_str()))
+                        .takes_value(true)
+                        .help("The number of the block"),
+                ),
+        )
+        .subcommand(
+            SubCommand::with_name("getStateProof")
+                .about("Get the proof of the variable at the specified height")
+                .arg(
+                    Arg::with_name("height")
+                        .long("height")
+                        .required(true)
+                        .validator(|s| parse_height(s.as_str()))
+                        .default_value("latest")
+                        .help("The number of the block"),
+                )
+                .arg(
+                    Arg::with_name("address")
+                        .long("address")
+                        .required(true)
+                        .validator(|address| parse_address(address.as_str()))
+                        .takes_value(true)
+                        .help("Contract Address"),
+                )
+                .arg(
+                    Arg::with_name("key")
+                        .long("key")
+                        .required(true)
+                        .takes_value(true)
+                        .validator(|key| h256_validator(key.as_str()))
+                        .help("The position of the variable"),
+                ),
+        )
+        .subcommand(
+            SubCommand::with_name("getStorageAt")
+                .about("Get the value of the key at the specified height")
+                .arg(
+                    Arg::with_name("height")
+                        .long("height")
+                        .default_value("latest")
+                        .validator(|s| parse_height(s.as_str()))
+                        .takes_value(true)
+                        .help("The number of the block"),
+                )
+                .arg(
+                    Arg::with_name("address")
+                        .long("address")
+                        .required(true)
+                        .validator(|address| parse_address(address.as_str()))
+                        .takes_value(true)
+                        .help("Account Address"),
+                )
+                .arg(
+                    Arg::with_name("key")
+                        .long("key")
+                        .required(true)
+                        .takes_value(true)
+                        .validator(|key| h256_validator(key.as_str()))
+                        .help("The position of the variable"),
+                ),
+        )
+        .subcommand(
+            SubCommand::with_name("getVersion").about("Get release version info of all modules"),
+        )
+        .subcommand(
+            SubCommand::with_name("estimateQuota")
+                .about("Estimate a transaction's quota used.")
+                .arg(
+                    Arg::with_name("from")
+                        .long("from")
+                        .validator(|address| parse_address(address.as_str()))
+                        .takes_value(true)
+                        .help("From address"),
+                )
+                .arg(
+                    Arg::with_name("to")
+                        .long("to")
+                        .validator(|address| parse_address(address.as_str()))
+                        .takes_value(true)
+                        .required(true)
+                        .help("To address"),
+                )
+                .arg(
+                    Arg::with_name("data")
+                        .long("data")
+                        .takes_value(true)
+                        .help("The data"),
+                )
+                .arg(
+                    Arg::with_name("height")
+                        .long("height")
+                        .takes_value(true)
+                        .validator(|s| parse_height(s.as_str()))
+                        .default_value("latest")
+                        .help("The block number"),
+                ),
+        )
 }
 
 /// RPC processor
 pub fn rpc_processor(
     sub_matches: &ArgMatches,
     printer: &Printer,
-    url: Option<&str>,
-    env_variable: &GlobalConfig,
+    config: &mut GlobalConfig,
+    client: Client,
 ) -> Result<(), String> {
-    let debug = sub_matches.is_present("debug") || env_variable.debug();
-    let is_color = !sub_matches.is_present("no-color") && env_variable.color();
-    let mut client = Client::new()
-        .map_err(|err| format!("{}", err))?
+    let debug = sub_matches.is_present("debug") || config.debug();
+    let is_color = !sub_matches.is_present("no-color") && config.color();
+    let mut client = client
         .set_debug(debug)
-        .set_uri(url.unwrap_or_else(|| match sub_matches.subcommand() {
-            (_, Some(m)) => get_url(m),
-            _ => "http://127.0.0.1:1337",
-        }));
+        .set_uri(get_url(sub_matches, config));
+
     let result = match sub_matches.subcommand() {
         ("peerCount", _) => client.get_peer_count(),
+        ("peersInfo", _) => client.get_peers_info(),
         ("blockNumber", _) => client.get_block_number(),
         ("sendRawTransaction", Some(m)) => {
-            let blake2b = blake2b(m, env_variable);
+            let encryption = encryption(m, config);
 
-            if let Some(chain_id) = m.value_of("chain-id").map(|s| s.parse::<u32>().unwrap()) {
+            if let Some(chain_id) = m.value_of("chain-id").map(|s| parse_u256(s).unwrap()) {
                 client.set_chain_id(chain_id);
             }
             if let Some(private_key) = m.value_of("private-key") {
-                client.set_private_key(parse_privkey(private_key)?);
+                client.set_private_key(&parse_privkey(private_key, encryption)?);
             }
             let code = m.value_of("code").unwrap();
             let address = m.value_of("address").unwrap();
             let current_height = m.value_of("height").map(|s| parse_u64(s).unwrap());
-            let quota = m.value_of("quota").map(|s| s.parse::<u64>().unwrap());
-            let value = m.value_of("value");
+            let quota = m.value_of("quota").map(|s| parse_u64(s).unwrap());
+            let value = m.value_of("value").map(|value| parse_u256(value).unwrap());
+            let version = m
+                .value_of("version")
+                .map(|version| parse_u32(version).unwrap());
             let tx_options = TransactionOptions::new()
                 .set_code(code)
                 .set_address(address)
                 .set_current_height(current_height)
                 .set_quota(quota)
-                .set_value(value);
-            client.send_raw_transaction(tx_options, blake2b)
+                .set_value(value)
+                .set_version(version);
+            client.send_raw_transaction(tx_options)
         }
         ("getBlockByHash", Some(m)) => {
             let hash = m.value_of("hash").unwrap();
@@ -454,13 +576,13 @@ pub fn rpc_processor(
             client.get_metadata(height)
         }
         ("getLogs", Some(m)) => client.get_logs(
-            m.values_of("topic").map(|value| value.collect()),
-            m.values_of("address").map(|value| value.collect()),
+            m.values_of("topic").map(Iterator::collect),
+            m.values_of("address").map(Iterator::collect),
             m.value_of("from"),
             m.value_of("to"),
         ),
         ("getTransaction", Some(m)) => {
-            let blake2b = blake2b(m, env_variable);
+            let encryption = encryption(m, config);
             let hash = m.value_of("hash").unwrap();
             let result = client.get_transaction(hash);
             if debug {
@@ -470,18 +592,9 @@ pub fn rpc_processor(
                             let tx = UnverifiedTransaction::from_str(&content).unwrap();
                             printer
                                 .println(&"---- [UnverifiedTransaction] ----".to_owned(), is_color);
-                            printer.println(&tx.to_json(), is_color);
+                            printer.println(&tx.to_json(encryption)?, is_color);
                             printer.println(
                                 &"---- [UnverifiedTransaction] ----\n".to_owned(),
-                                is_color,
-                            );
-                            let pub_key = tx.public_key(blake2b)?;
-                            printer.println(
-                                &format!(
-                                    "{} 0x{:#x}",
-                                    Yellow.paint("[from]:"),
-                                    pubkey_to_address(&pub_key)
-                                ),
                                 is_color,
                             );
                         }
@@ -500,17 +613,43 @@ pub fn rpc_processor(
         ("getFilterChanges", Some(m)) => client.get_filter_changes(m.value_of("id").unwrap()),
         ("getFilterLogs", Some(m)) => client.get_filter_logs(m.value_of("id").unwrap()),
         ("newFilter", Some(m)) => {
-            let address = m.values_of("address").map(|value| value.collect());
+            let address = m.values_of("address").map(Iterator::collect);
             let from = m.value_of("from");
             let to = m.value_of("to");
-            let topic = m.values_of("topic").map(|value| value.collect());
+            let topic = m.values_of("topic").map(Iterator::collect);
             client.new_filter(topic, address, from, to)
         }
+        ("getBlockHeader", Some(m)) => {
+            let height = m.value_of("height").unwrap();
+            client.get_block_header(height)
+        }
+        ("getStateProof", Some(m)) => {
+            let height = m.value_of("height").unwrap();
+            let address = m.value_of("address").unwrap();
+            let key = m.value_of("key").unwrap();
+            client.get_state_proof(address, key, height)
+        }
+        ("getStorageAt", Some(m)) => {
+            let height = m.value_of("height").unwrap();
+            let address = m.value_of("address").unwrap();
+            let key = m.value_of("key").unwrap();
+            client.get_storage_at(address, key, height)
+        }
+        ("getVersion", _) => {
+            <Client as ClientExt<JsonRpcResponse, ToolError>>::get_version(&client)
+        }
+        ("estimateQuota", Some(m)) => client.estimate_quota(
+            m.value_of("from"),
+            m.value_of("to").unwrap(),
+            m.value_of("data"),
+            m.value_of("height").unwrap(),
+        ),
         _ => {
             return Err(sub_matches.usage().to_owned());
         }
     };
     let resp = result.map_err(|err| format!("{}", err))?;
     printer.println(&resp, is_color);
+    set_output(&resp, config);
     Ok(())
 }

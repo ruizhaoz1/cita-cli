@@ -1,32 +1,69 @@
+################
+# CI Workflow:
+#  stages:
+#    1. test for cita-cli
+#    2. build bin
+#         build bin for linux
+#         build bin for mac
+#  deploy: release bin to Github Release, trigger by `git push --tags`
+#  after_deploy: build cita-cli image and push to https://hub.docker.com/
+
+################
 language: rust
 rust:
-  - stable
-before_script:
-  - rustup component add rustfmt-preview
-addons:
-  apt:
-    sources:
-      - ubuntu-toolchain-r-test
-      - llvm-toolchain-trusty-5.0
-      - sourceline: 'deb http://apt.llvm.org/trusty/ llvm-toolchain-trusty-5.0 main'
-        key_url: 'https://apt.llvm.org/llvm-snapshot.gpg.key'
-    packages:
-      - gcc-5
-      - g++-5
-      - clang-5.0
-      - clang-5.0-dev
+- stable
+sudo: required
 cache:
-  apt: true
-  cargo: true
+  timeout: 1024
   directories:
-    - $HOME/libsodium-1.0.16
+  - "$TRAVIS_BUILD_DIR"
+  - "$TRAVIS_BUILD_DIR/docker/release"
+stages:
+- auto-test-in-ci
+- build-bin-for-linux-deploy
+- build-bin-for-mac-deploy
+jobs:
+  include:
+  - stage: automatic-test-in-ci
+    os:
+    - linux
+    dist: bionic
+    name: automatic test for cita-cli
+    before_script:
+    - rustup component add rustfmt-preview
+    - rustup component add clippy
+    script:
+    # For speed up the CI process
+    #   See: https://docs.travis-ci.com/user/build-stages/#Data-persistence-between-stages-and-jobs
+    - .ci-script/clippy_test.sh
+    - cargo fmt -- --check && cargo test --all
+    - cd cita-cli && cargo test --no-default-features --features openssl
 
-install:
-  - .ci-script/travis-install-libsodium.sh
-  - export PKG_CONFIG_PATH=$HOME/libsodium-1.0.16/lib/pkgconfig:$PKG_CONFIG_PATH
-  - export LD_LIBRARY_PATH=$HOME/libsodium-1.0.16/lib:$LD_LIBRARY_PATH
+  - stage: build-bin-for-linux-deploy
+    os:
+    - linux
+    dist: bionic
+    name: buid bin for linux deploy
+    if: tag IS present
+    script:
+    - "./.ci-script/build-bin-for-linux-deploy.sh"
 
-script:
-  # For speed up the CI process
-  #   See: https://docs.travis-ci.com/user/build-stages/#Data-persistence-between-stages-and-jobs
-  - cargo fmt -- --write-mode check && cargo build --all-features --all && cargo test --all-features --all
+  - stage: build-bin-for-mac-deploy
+    os:
+    - osx
+    name: buid bin for mac deploy
+    if: tag IS present
+    script:
+    - "./.ci-script/build-bin-for-mac-deploy.sh"
+deploy:
+  provider: releases
+  skip_cleanup: true
+  api_key:
+    secure: $GITHUB_TOKEN
+  file:
+    - "./docker/release/cita-cli-x86_64-musl-tls-${TRAVIS_TAG}.tar.gz"
+    - "./docker/release/cita-cli-x86_64-mac-osx-tls-${TRAVIS_TAG}.tar.gz"
+  on:
+    tags: true
+after_deploy:
+  - "./.ci-script/build-push-docker-image.sh"

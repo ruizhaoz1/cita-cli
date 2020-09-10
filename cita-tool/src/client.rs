@@ -1,3 +1,6 @@
+#[cfg(all(feature = "rustls", feature = "openssl"))]
+compile_error!("features `rustls` and `openssl` are mutually exclusive");
+
 /// Basic client api, for Low-level interface
 pub mod basic;
 /// System contract client api, call system contract more easy
@@ -27,7 +30,7 @@ use std::str;
 /// ```
 #[inline]
 pub fn remove_0x(hex: &str) -> &str {
-    {
+    if hex.len() >= 2 {
         let tmp = hex.as_bytes();
         if tmp[..2] == b"0x"[..] || tmp[..2] == b"0X"[..] {
             return str::from_utf8(&tmp[2..]).unwrap();
